@@ -1,52 +1,93 @@
 {-# LANGUAGE OverloadedStrings #-}
 
 import           Control.Concurrent (threadDelay)
+import           Control.Lens ((^.), (.~), (&))
+import           Control.Lens.Type (Lens')
 import           Control.Monad
+import           Data.Aeson as Aeson
 import qualified Data.Configurator as Conf
 import           Data.Configurator.Types (Configured, Name, Value)
 import qualified Data.List as List
 import qualified Data.Map as Map
 import           Data.Text (Text)
+import qualified Network.Wreq as Wreq
 import           System.Directory (doesFileExist)
 
-type Token = String
-type Key = String
+type Token = Text
+type Key = Text
 data Auth = Auth { token :: Token, key :: Key }
 
 data QueryId = ObjectId | Me
 type ObjectId = String
 
-data Resource = Resource { oid :: ObjectId }
-type Member = Resource
-type Action = Resource
-type Board = Resource
+data Member = Member ObjectId
+data Board = Board ObjectId
+data Card = Card ObjectId
+data ActionType = CommentAction | MiscType String
+data Action = Action ObjectId ActionType
+data Comment = Comment Action Text
+
+instance Aeson.ToJSON Member where
+  toJSON (Member id) = Aeson.toJSON id
+instance Aeson.ToJSON Board where
+  toJSON (Board id) = Aeson.toJSON id
+instance Aeson.ToJSON Card where
+  toJSON (Card id) = Aeson.toJSON id
+instance Aeson.ToJSON Action where
+  toJSON (Action id actionType) = Aeson.toJSON id
+
+instance Aeson.FromJSON Member where
+  parseJSON (Aeson.Object v) = undefined
+instance Aeson.FromJSON Board where
+  parseJSON (Aeson.Object v) = undefined
+instance Aeson.FromJSON Card where
+  parseJSON (Aeson.Object v) = undefined
+instance Aeson.FromJSON Action where
+  parseJSON (Aeson.Object v) = undefined
+
+class TrelloResource a where
+  oid :: a -> ObjectId
+instance TrelloResource Member where
+  oid (Member id) = id
+instance TrelloResource Board where
+  oid (Board id) = id
+instance TrelloResource Card where
+  oid (Card id) = id
+instance TrelloResource Action where
+  oid (Action id actionType) = id
 
 -- Map of board id -> last action id scanned
 type TailMarker = ObjectId
 type PollState = Map.Map ObjectId TailMarker
 
 -- request stuff
-data Verb = GET | POST | PUT | DELETE deriving (Show)
 type Path = String
 data Response = Response
 
-requestTrello :: Auth -> Verb -> Path -> IO Response
-requestTrello _ verb path = do
-  putStrLn $ (show verb) ++ " " ++ path
-  return Response
+-- authOptions :: Auth -> Lens' Wreq.Options [Text]
+-- authOptions auth = Wreq.param "key" .~ [key auth]
+
+getTrello :: (FromJSON a) => Auth -> Path -> IO a
+getTrello auth path = do
+  let opts = Wreq.defaults
+             & Wreq.param "key" .~ [key auth] 
+             & Wreq.param "token" .~ [token auth]
+  -- response <- Wreq.asJSON =<< Wreq.getWith opts path
+  undefined
+
+postTrello :: Auth -> Path -> IO Response
+postTrello = undefined
 
 getNewActions :: Auth -> Board -> TailMarker -> IO [Action]
 getNewActions auth board last = do
-  response <- requestTrello auth GET url
-  return []
+  getTrello auth url :: IO [Action]
   where url = "/1/boards/" ++ (oid board) ++ "/actions" ++ qs
         qs = "?actions_since=" ++ last
 
 -- Get list of boards you are a member of
 getBoardsList :: Auth -> IO [Board]
 getBoardsList auth = do
-  response <- requestTrello auth GET "/1/members/me/boards?fields=id"
-  return []
+  getTrello auth "/1/members/me/boards?fields=id" :: IO [Board]
 
 updateState :: Auth -> (Board, TailMarker) -> IO TailMarker
 updateState auth (board, last) = do
