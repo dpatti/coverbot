@@ -19,9 +19,12 @@ executable coverbot
   -- other-modules:       
   build-depends:       base == 4.6.*
                       ,aeson == 0.8.*
+                      ,base-prelude == 0.1.11
+                      ,bytestring == 0.10.4.1
                       ,configurator
                       ,containers >= 0.5.0.0
                       ,directory >= 1.2.0.1
                       ,lens == 4.*
+                      ,lens-aeson == 1.0.0.3
                       ,text >= 0.11.3.1
                       ,wreq >= 0.1.0.1

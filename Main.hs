@@ -1,15 +1,16 @@
-{-# LANGUAGE OverloadedStrings #-}
+{-# LANGUAGE OverloadedStrings, NoImplicitPrelude #-}
 
+import           BasePrelude
 import           Control.Concurrent (threadDelay)
-import           Control.Lens ((^.), (.~), (&))
+import           Control.Lens
 import           Control.Lens.Type (Lens')
-import           Control.Monad
 import           Data.Aeson as Aeson
+import qualified Data.Aeson.Lens as Json
+import qualified Data.ByteString.Lazy as BS
 import qualified Data.Configurator as Conf
 import           Data.Configurator.Types (Configured, Name, Value)
-import qualified Data.List as List
 import qualified Data.Map as Map
-import           Data.Text (Text)
+import           Data.Text (Text, unpack)
 import qualified Network.Wreq as Wreq
 import           System.Directory (doesFileExist)
 
@@ -64,40 +65,49 @@ type PollState = Map.Map ObjectId TailMarker
 type Path = String
 data Response = Response
 
--- authOptions :: Auth -> Lens' Wreq.Options [Text]
--- authOptions auth = Wreq.param "key" .~ [key auth]
+authOptions :: Auth -> Wreq.Options -> Wreq.Options
+authOptions auth = (Wreq.param "key" .~ [key auth])
+                 . (Wreq.param "token" .~ [token auth])
 
-getTrello :: (FromJSON a) => Auth -> Path -> IO a
+apiRoot :: Path
+apiRoot = "https://api.trello.com"
+
+fullPath :: Path -> Path
+fullPath = (apiRoot ++)
+
+getTrello :: Auth -> Path -> IO (Wreq.Response BS.ByteString)
 getTrello auth path = do
-  let opts = Wreq.defaults
-             & Wreq.param "key" .~ [key auth] 
-             & Wreq.param "token" .~ [token auth]
-  -- response <- Wreq.asJSON =<< Wreq.getWith opts path
-  undefined
+  let opts = Wreq.defaults & authOptions auth
+  Wreq.getWith opts (fullPath path)
 
 postTrello :: Auth -> Path -> IO Response
 postTrello = undefined
 
 getNewActions :: Auth -> Board -> TailMarker -> IO [Action]
 getNewActions auth board last = do
-  getTrello auth url :: IO [Action]
+  r <- getTrello auth url
+  let actions = r ^.. (Wreq.responseBody . Json.values)
+  return $ map (makeAction . toAction) actions
   where url = "/1/boards/" ++ (oid board) ++ "/actions" ++ qs
         qs = "?actions_since=" ++ last
+        toAction a = ((unpack . fromJust $ a ^? Json.key "id" . Json._String), (unpack . fromJust $ a ^? Json.key "type" . Json._String))
+        makeAction (id, t) = Action id (MiscType t)
 
 -- Get list of boards you are a member of
 getBoardsList :: Auth -> IO [Board]
 getBoardsList auth = do
-  getTrello auth "/1/members/me/boards?fields=id" :: IO [Board]
+  undefined
+  -- getTrello auth "/1/members/me/boards?fields=id" :: IO [Board]
 
 updateState :: Auth -> (Board, TailMarker) -> IO TailMarker
-updateState auth (board, last) = do
-  actions <- getNewActions auth board last
-  case null actions of
-    True  -> return last
-    False ->
+updateState auth (board, tm) = do
+  actions <- getNewActions auth board tm
+  case actions of
+    []  -> return tm
+    _   ->
       -- See if we take action
       -- Return the new last read
-      return . oid . List.last $ actions
+      return . oid . last $ actions
 
 -- Turn a state object and board list into a list of tail markers
 extractStates :: PollState -> [Board] -> [TailMarker]
@@ -155,6 +165,7 @@ conf key = do
 
 main :: IO ()
 main = do
-  auth <- liftM2 Auth (conf "token") (conf "key")
+  auth <- Auth <$> (conf "token") <*> (conf "key")
+
   pollState <- restoreState
   pollBoards auth pollState
