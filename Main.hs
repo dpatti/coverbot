@@ -1,14 +1,11 @@
 {-# LANGUAGE OverloadedStrings, NoImplicitPrelude #-}
 
 import           BasePrelude
-import           Control.Concurrent (threadDelay)
-import           Control.Lens
-import           Control.Lens.Type (Lens')
-import           Data.Aeson as Aeson
-import qualified Data.Aeson.Lens as Json
+import           Control.Lens hiding (Action)
+import           Data.Aeson.Lens
 import qualified Data.ByteString.Lazy as BS
 import qualified Data.Configurator as Conf
-import           Data.Configurator.Types (Configured, Name, Value)
+import           Data.Configurator.Types (Configured, Name)
 import qualified Data.Map as Map
 import           Data.Text (Text, unpack)
 import qualified Network.Wreq as Wreq
@@ -16,46 +13,26 @@ import           System.Directory (doesFileExist)
 
 type Token = Text
 type Key = Text
-data Auth = Auth { token :: Token, key :: Key }
+data Auth = Auth { authToken :: Token, authKey :: Key }
 
-data QueryId = ObjectId | Me
 type ObjectId = String
-
 data Member = Member ObjectId
 data Board = Board ObjectId
 data Card = Card ObjectId
-data ActionType = CommentAction | MiscType String
+data ActionType = MiscType String
 data Action = Action ObjectId ActionType
 data Comment = Comment Action Text
-
-instance Aeson.ToJSON Member where
-  toJSON (Member id) = Aeson.toJSON id
-instance Aeson.ToJSON Board where
-  toJSON (Board id) = Aeson.toJSON id
-instance Aeson.ToJSON Card where
-  toJSON (Card id) = Aeson.toJSON id
-instance Aeson.ToJSON Action where
-  toJSON (Action id actionType) = Aeson.toJSON id
-
-instance Aeson.FromJSON Member where
-  parseJSON (Aeson.Object v) = undefined
-instance Aeson.FromJSON Board where
-  parseJSON (Aeson.Object v) = undefined
-instance Aeson.FromJSON Card where
-  parseJSON (Aeson.Object v) = undefined
-instance Aeson.FromJSON Action where
-  parseJSON (Aeson.Object v) = undefined
 
 class TrelloResource a where
   oid :: a -> ObjectId
 instance TrelloResource Member where
-  oid (Member id) = id
+  oid (Member idMember) = idMember
 instance TrelloResource Board where
-  oid (Board id) = id
+  oid (Board idBoard) = idBoard
 instance TrelloResource Card where
-  oid (Card id) = id
+  oid (Card idCard) = idCard
 instance TrelloResource Action where
-  oid (Action id actionType) = id
+  oid (Action idAction _) = idAction
 
 -- Map of board id -> last action id scanned
 type TailMarker = ObjectId
@@ -63,11 +40,10 @@ type PollState = Map.Map ObjectId TailMarker
 
 -- request stuff
 type Path = String
-data Response = Response
 
 authOptions :: Auth -> Wreq.Options -> Wreq.Options
-authOptions auth = (Wreq.param "key" .~ [key auth])
-                 . (Wreq.param "token" .~ [token auth])
+authOptions auth = (Wreq.param "key" .~ [authKey auth])
+                 . (Wreq.param "token" .~ [authToken auth])
 
 apiRoot :: Path
 apiRoot = "https://api.trello.com"
@@ -80,22 +56,24 @@ getTrello auth path = do
   let opts = Wreq.defaults & authOptions auth
   Wreq.getWith opts (fullPath path)
 
-postTrello :: Auth -> Path -> IO Response
-postTrello = undefined
+postTrello :: Auth -> Path -> IO (Wreq.Response BS.ByteString)
+postTrello auth path = do
+  let opts = Wreq.defaults & authOptions auth
+  Wreq.postWith opts (fullPath path) BS.empty
 
 getNewActions :: Auth -> Board -> TailMarker -> IO [Action]
-getNewActions auth board last = do
+getNewActions auth board tm = do
   r <- getTrello auth url
-  let actions = r ^.. (Wreq.responseBody . Json.values)
+  let actions = r ^.. (Wreq.responseBody . values)
   return $ map (makeAction . toAction) actions
   where url = "/1/boards/" ++ (oid board) ++ "/actions" ++ qs
-        qs = "?actions_since=" ++ last
-        toAction a = ((unpack . fromJust $ a ^? Json.key "id" . Json._String), (unpack . fromJust $ a ^? Json.key "type" . Json._String))
-        makeAction (id, t) = Action id (MiscType t)
+        qs = "?actions_since=" ++ tm
+        toAction a = ((unpack . fromJust $ a ^? key "id" . _String), (unpack . fromJust $ a ^? key "type" . _String))
+        makeAction (idAction, t) = Action idAction (MiscType t)
 
 -- Get list of boards you are a member of
 getBoardsList :: Auth -> IO [Board]
-getBoardsList auth = do
+getBoardsList = do
   undefined
   -- getTrello auth "/1/members/me/boards?fields=id" :: IO [Board]
 
@@ -111,9 +89,9 @@ updateState auth (board, tm) = do
 
 -- Turn a state object and board list into a list of tail markers
 extractStates :: PollState -> [Board] -> [TailMarker]
-extractStates ps boards = map lookup boards where
-  lookup board = case Map.lookup (oid board) ps of
-                  Just last -> last
+extractStates ps boards = map getMarker boards where
+  getMarker board = case Map.lookup (oid board) ps of
+                  Just tm -> tm
                   Nothing -> (oid board)
 
 -- Merge states together. Note: the first argument is given precedence.
@@ -159,9 +137,9 @@ pollBoards auth state = do
 
 -- Load configuration from disk
 conf :: Configured a => Name -> IO a
-conf key = do
+conf name = do
   config <- Conf.load [Conf.Required "conf"]
-  Conf.require config key
+  Conf.require config name
 
 main :: IO ()
 main = do
