@@ -7,7 +7,7 @@ import qualified Data.ByteString.Lazy as BS
 import qualified Data.Configurator as Conf
 import           Data.Configurator.Types (Configured, Name)
 import qualified Data.Map as Map
-import           Data.Text (Text, unpack)
+import           Data.Text (Text, pack, unpack)
 import qualified Network.Wreq as Wreq
 import           System.Directory (doesFileExist)
 
@@ -51,41 +51,77 @@ apiRoot = "https://api.trello.com"
 fullPath :: Path -> Path
 fullPath = (apiRoot ++)
 
-getTrello :: Auth -> Path -> IO (Wreq.Response BS.ByteString)
-getTrello auth path = do
-  let opts = Wreq.defaults & authOptions auth
+type PartialQuery = Wreq.Options -> Wreq.Options
+
+emptyQuery :: PartialQuery
+emptyQuery = id
+
+getTrello :: Auth -> Path -> PartialQuery -> IO (Wreq.Response BS.ByteString)
+getTrello auth path query = do
+  let opts = Wreq.defaults & authOptions auth & query
+  -- putStrLn $ "GET " ++ path
+  -- putStrLn $ show opts
   Wreq.getWith opts (fullPath path)
 
+{-
 postTrello :: Auth -> Path -> IO (Wreq.Response BS.ByteString)
 postTrello auth path = do
   let opts = Wreq.defaults & authOptions auth
   Wreq.postWith opts (fullPath path) BS.empty
+-}
 
+grabValue :: AsValue a => a -> Text -> String
+grabValue obj name = unpack . fromJust $ obj ^? key name . _String
+
+-- Get new actions on a single board
 getNewActions :: Auth -> Board -> TailMarker -> IO [Action]
 getNewActions auth board tm = do
-  r <- getTrello auth url
+  r <- getTrello auth url query
   let actions = r ^.. (Wreq.responseBody . values)
   return $ map (makeAction . toAction) actions
-  where url = "/1/boards/" ++ (oid board) ++ "/actions" ++ qs
-        qs = "?actions_since=" ++ tm
-        toAction a = ((unpack . fromJust $ a ^? key "id" . _String), (unpack . fromJust $ a ^? key "type" . _String))
+  where url = "/1/boards/" ++ (oid board) ++ "/actions"
+        -- TODO: if we get the max number back, we have to re-requst using a
+        -- before as well, as we can't guarantee order and therefore cannot
+        -- update the tail
+        query = (Wreq.param "since" .~ [pack tm])
+              . (Wreq.param "filter" .~ ["addMemberToCard,commentCard"])
+              . (Wreq.param "limit" .~ ["100"])
+        toAction a = (grabValue a "id", grabValue a "type")
         makeAction (idAction, t) = Action idAction (MiscType t)
 
 -- Get list of boards you are a member of
 getBoardsList :: Auth -> IO [Board]
-getBoardsList = do
-  undefined
-  -- getTrello auth "/1/members/me/boards?fields=id" :: IO [Board]
+getBoardsList auth = do
+  r <- getTrello auth url emptyQuery
+  let boards = r ^.. (Wreq.responseBody . values)
+  -- debug: only process a single board
+  return . {-(:[]) . head . -} map (Board . toBoard) $ boards
+  where url = "/1/members/me/boards?fields=id"
+        toBoard b = grabValue b "id"
+
+{-
+actionTrigger :: Action -> Maybe ()
+actionTrigger (Action idAction actionType) = case actionType of
+  MiscType "commentCard" -> Just ()
+  MiscType "addMemberToCard" -> Just ()
+  _ -> Nothing
+
+processTrigger :: Maybe () -> IO ()
+processTrigger _ = return ()
+-}
 
 updateState :: Auth -> (Board, TailMarker) -> IO TailMarker
 updateState auth (board, tm) = do
+  putStrLn $ "Updating board " ++ oid board
   actions <- getNewActions auth board tm
-  case actions of
-    []  -> return tm
-    _   ->
-      -- See if we take action
-      -- Return the new last read
-      return . oid . last $ actions
+  let newActions = filter ((> tm) . oid) actions
+  putStrLn $ "  Found " ++ show (length newActions) ++ " new actions"
+  case newActions of
+    [] -> return tm
+    _ -> do
+      let newTm = maximum . map oid $ newActions
+      putStrLn $ "  Processed up to action " ++ newTm
+      return newTm
 
 -- Turn a state object and board list into a list of tail markers
 extractStates :: PollState -> [Board] -> [TailMarker]
@@ -122,6 +158,7 @@ pollBoards auth state = do
   putStrLn "Polling..."
   -- Get the boards we are on
   boards <- getBoardsList auth
+  putStrLn . ("Found boards: " ++) . show . map oid $ boards
   -- Pull out the states for those boards
   let states = extractStates state boards
   -- Using the existing state, perform the query on each board that returns new
