@@ -21,7 +21,6 @@ data Board = Board ObjectId
 data Card = Card ObjectId
 data ActionType = MiscType String
 data Action = Action ObjectId ActionType
-data Comment = Comment Action Text
 
 class TrelloResource a where
   oid :: a -> ObjectId
@@ -79,7 +78,7 @@ getNewActions auth board tm = do
   r <- getTrello auth url query
   let actions = r ^.. (Wreq.responseBody . values)
   return $ map (makeAction . toAction) actions
-  where url = "/1/boards/" ++ (oid board) ++ "/actions"
+  where url = "/1/boards/" ++ oid board ++ "/actions"
         -- TODO: if we get the max number back, we have to re-requst using a
         -- before as well, as we can't guarantee order and therefore cannot
         -- update the tail
@@ -125,10 +124,8 @@ updateState auth (board, tm) = do
 
 -- Turn a state object and board list into a list of tail markers
 extractStates :: PollState -> [Board] -> [TailMarker]
-extractStates ps boards = map getMarker boards where
-  getMarker board = case Map.lookup (oid board) ps of
-                  Just tm -> tm
-                  Nothing -> (oid board)
+extractStates ps = map getMarker where
+  getMarker board = fromMaybe (oid board) (Map.lookup (oid board) ps)
 
 -- Merge states together. Note: the first argument is given precedence.
 mergeState :: PollState -> PollState -> PollState
@@ -139,18 +136,17 @@ stateFile = ".state"
 
 -- Save poll state to disk
 commitState :: PollState -> IO ()
-commitState ps = do
-  writeFile stateFile (show ps)
+commitState ps = writeFile stateFile (show ps)
 
 -- Load poll state from disk
-restoreState :: IO (PollState)
+restoreState :: IO PollState
 restoreState = do
   exists <- doesFileExist stateFile
-  case exists of
-    True -> do
+  if exists
+    then do
       contents <- readFile stateFile
       return (read contents)
-    False -> return Map.empty
+    else return Map.empty
 
 -- Main loop
 pollBoards :: Auth -> PollState -> IO ()
@@ -180,7 +176,7 @@ conf name = do
 
 main :: IO ()
 main = do
-  auth <- Auth <$> (conf "token") <*> (conf "key")
+  auth <- Auth <$> conf "token" <*> conf "key"
 
   pollState <- restoreState
   pollBoards auth pollState
