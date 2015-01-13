@@ -4,6 +4,7 @@ import           BasePrelude
 import           Control.Lens hiding (Action)
 import           Data.Aeson.Lens
 import           Data.Aeson.Types (Value)
+import           Data.ByteString.Lens
 import qualified Data.ByteString.Lazy as BS
 import qualified Data.Configurator as Conf
 import           Data.Configurator.Types (Configured, Name)
@@ -70,13 +71,31 @@ addMemberToCard auth action = do
     img <- getJpgTo cardTitle
     putStrLn $ "Using image: " ++ img
 
+    let cid = grabString (r ^. Wreq.responseBody) "id"
+    addAttachment auth cid img
+
 commentCard :: Auth -> Action -> IO ()
 commentCard _ _ = putStrLn "commentCard"
 
 -- Helpers
 
 getJpgTo :: String -> IO String
-getJpgTo = undefined
+getJpgTo name = do
+  r <- Wreq.get $ "http://" ++ clean name ++ ".jpg.to/l+r+jpg"
+  return . parseImageTag $ r ^. Wreq.responseBody . from packedChars
+
+clean :: String -> String
+clean = dotSpace . compactSpace . removeSpecial
+  where removeSpecial = filter (\c -> isAlphaNum c || isSpace c)
+        compactSpace (' ':' ':xs) = ' ' : compactSpace xs
+        compactSpace (a:xs) = a : compactSpace xs
+        compactSpace [] = []
+        dotSpace = map (\c -> if isSpace c then '.' else c)
+
+parseImageTag :: String -> String
+parseImageTag = leftChunk . rightChunk
+  where rightChunk = drop 75
+        leftChunk = takeWhile (/= '"')
 
 getDataIdMember :: Action -> ObjectId
 getDataIdMember (Action _ _ adata) = grabString adata "idMember"
@@ -115,16 +134,17 @@ emptyQuery = id
 getTrello :: Auth -> Path -> PartialQuery -> IO (Wreq.Response BS.ByteString)
 getTrello auth path query = do
   let opts = Wreq.defaults & authOptions auth & query
-  -- putStrLn $ "GET " ++ path
-  -- putStrLn $ show opts
   Wreq.getWith opts (fullPath path)
 
-{-
-postTrello :: Auth -> oPath -> IO (Wreq.Response BS.ByteString)
-postTrello auth path = do
-  let opts = Wreq.defaults & authOptions auth
+postTrello :: Auth -> Path -> PartialQuery -> IO (Wreq.Response BS.ByteString)
+postTrello auth path query = do
+  let opts = Wreq.defaults & authOptions auth & query
   Wreq.postWith opts (fullPath path) BS.empty
--}
+
+addAttachment :: Auth -> ObjectId -> String -> IO ()
+addAttachment auth cid url = void $ postTrello auth ("/1/cards/" ++ cid ++ "/attachments") params
+  where params = (Wreq.param "name" .~ ["image"])
+               . (Wreq.param "url" .~ [pack url])
 
 getMe :: Auth -> IO Member
 getMe auth = do
