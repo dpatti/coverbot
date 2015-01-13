@@ -27,6 +27,12 @@ data Card = Card ObjectId
 data ActionType = MiscType String deriving Show
 data Action = Action ObjectId ActionType ActionData deriving Show
 
+username :: Member -> Username
+username (Member _ u) = u
+
+getData :: Action -> ActionData
+getData (Action _ _ d) = d
+
 class TrelloResource a where
   oid :: a -> ObjectId
 instance TrelloResource Member where
@@ -61,23 +67,48 @@ addMemberToCard :: Auth -> Action -> IO ()
 addMemberToCard auth action = do
   putStrLn $ "addMemberToCard " ++ show action
   me <- getMe auth
-  when (isMyId me (getDataIdMember action)) $ do
+  let adata = getData action
+  when (isMyId me (grabString adata "idMember")) $ do
     putStrLn $ "Action with id " ++ oid action ++ " added me"
 
-    r <- getCard auth $ getDataCardId action
-    let cardTitle = grabString (r ^. Wreq.responseBody) "name"
-    putStrLn $ "Card title: " ++ cardTitle
+    let card = fromJust $ adata ^? key "card"
+    let cardTitle = strip $ grabString card "name"
+    putStrLn $ "Card title: " ++ show cardTitle
 
-    img <- getJpgTo cardTitle
-    putStrLn $ "Using image: " ++ img
-
-    let cid = grabString (r ^. Wreq.responseBody) "id"
-    addAttachment auth cid img
+    let cid = grabString card "id"
+    coverMessage auth cid cardTitle
+    removeSelf auth me cid
 
 commentCard :: Auth -> Action -> IO ()
-commentCard _ _ = putStrLn "commentCard"
+commentCard auth action = do
+  putStrLn $ "commentCard " ++ show action
+  me <- getMe auth
+  let adata = getData action
+  let comment = grabString adata "text"
+  when (isMention me comment) $ do
+    putStrLn $ "Action with id " ++ oid action ++ " commented at me"
+
+    let message = strip . spliceList ('@':username me) $ comment
+    putStrLn $ "Message: " ++ show message
+
+    let card = fromJust $ adata ^? key "card"
+
+    useMessage <- if message /= ""
+      then return message
+      else do
+        let cardTitle = strip $ grabString card "name"
+        putStrLn $ "Using card title: " ++ show cardTitle
+        return cardTitle
+
+    coverMessage auth (grabString card "id") useMessage
 
 -- Helpers
+
+coverMessage :: Auth -> ObjectId -> String -> IO ()
+coverMessage auth cid message = do
+  img <- getJpgTo message
+  putStrLn $ "Using image: " ++ img
+  addAttachment auth cid img
 
 getJpgTo :: String -> IO String
 getJpgTo name = do
@@ -85,34 +116,37 @@ getJpgTo name = do
   return . parseImageTag $ r ^. Wreq.responseBody . from packedChars
 
 clean :: String -> String
-clean = dotSpace . compactSpace . removeSpecial
+clean = dotSpace . strip . compactSpace . removeSpecial
   where removeSpecial = filter (\c -> isAlphaNum c || isSpace c)
         compactSpace (' ':' ':xs) = ' ' : compactSpace xs
         compactSpace (a:xs) = a : compactSpace xs
         compactSpace [] = []
         dotSpace = map (\c -> if isSpace c then '.' else c)
 
+strip :: String -> String
+strip = rstrip . lstrip
+  where lstrip (x:xs)
+          | isSpace x = lstrip xs
+          | otherwise = x:xs
+        lstrip [] = []
+        rstrip = reverse . lstrip . reverse
+
 parseImageTag :: String -> String
 parseImageTag = leftChunk . rightChunk
   where rightChunk = drop 75
         leftChunk = takeWhile (/= '"')
 
-getDataIdMember :: Action -> ObjectId
-getDataIdMember (Action _ _ adata) = grabString adata "idMember"
-
-getDataCardId :: Action -> ObjectId
-getDataCardId (Action _ _ adata) = grabString (fromJust $ adata ^? key "card") "id"
-
 isMyId :: Member -> ObjectId -> Bool
 isMyId (Member me _) other = me == other
 
-{-
-isMyName :: Member -> String -> Bool
-isMyName (Member _ me) other = (me == other)
+isMention :: Member -> String -> Bool
+isMention (Member _ me) comment = ('@':me) `isInfixOf` comment
 
-cardTitle :: Card -> String
-cardTitle = undefined
--}
+spliceList :: Eq a => [a] -> [a] -> [a]
+spliceList remove source@(x:xs)
+  | remove `isPrefixOf` source = spliceList remove $ drop (length remove) source
+  | otherwise = x : spliceList remove xs
+spliceList _ [] = []
 
 -- Trello client
 
@@ -141,6 +175,15 @@ postTrello auth path query = do
   let opts = Wreq.defaults & authOptions auth & query
   Wreq.postWith opts (fullPath path) BS.empty
 
+deleteTrello :: Auth -> Path -> PartialQuery -> IO (Wreq.Response BS.ByteString)
+deleteTrello auth path query = do
+  let opts = Wreq.defaults & authOptions auth & query
+  Wreq.deleteWith opts (fullPath path)
+
+removeSelf :: Auth -> Member -> ObjectId -> IO ()
+removeSelf auth (Member me _) cid = void $
+  deleteTrello auth ("/1/cards/" ++ cid ++ "/members/" ++ me) emptyQuery
+
 addAttachment :: Auth -> ObjectId -> String -> IO ()
 addAttachment auth cid url = void $ postTrello auth ("/1/cards/" ++ cid ++ "/attachments") params
   where params = (Wreq.param "name" .~ ["image"])
@@ -151,9 +194,6 @@ getMe auth = do
   r <- getTrello auth "/1/members/me" emptyQuery
   let me = r ^. Wreq.responseBody
   return $ Member (grabString me "id") (grabString me "username")
-
-getCard :: Auth -> ObjectId -> IO (Wreq.Response BS.ByteString)
-getCard auth cid = getTrello auth ("/1/cards/" ++ cid) emptyQuery
 
 grabString :: AsValue a => a -> Text -> String
 grabString obj name = unpack . fromMaybe "undefined" $ obj ^? key name . _String
@@ -205,7 +245,7 @@ updateState auth (board, tm) = do
       sequence_ actionTriggers
       let newTm = maximum . map oid $ newActions
       putStrLn $ "  Processed up to action " ++ newTm
-      return tm -- newTm
+      return newTm
 
 -- Turn a state object and board list into a list of tail markers
 extractStates :: PollState -> [Board] -> [TailMarker]
@@ -250,8 +290,8 @@ pollBoards auth state = do
   let newState = mergeState (Map.fromList updatedPairs) state
   -- Write to disk, wait, and iterate
   commitState newState
-  -- threadDelay 2000000
-  -- pollBoards auth newState
+  threadDelay 2000000
+  pollBoards auth newState
 
 -- Load configuration from disk
 conf :: Configured a => Name -> IO a
