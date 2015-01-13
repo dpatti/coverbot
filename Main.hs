@@ -3,6 +3,7 @@
 import           BasePrelude
 import           Control.Lens hiding (Action)
 import           Data.Aeson.Lens
+import           Data.Aeson.Types (Value)
 import qualified Data.ByteString.Lazy as BS
 import qualified Data.Configurator as Conf
 import           Data.Configurator.Types (Configured, Name)
@@ -16,22 +17,25 @@ type Key = Text
 data Auth = Auth { authToken :: Token, authKey :: Key }
 
 type ObjectId = String
-data Member = Member ObjectId
+type Username = String
+type ActionData = Value
+
+data Member = Member ObjectId Username
 data Board = Board ObjectId
 data Card = Card ObjectId
-data ActionType = MiscType String
-data Action = Action ObjectId ActionType
+data ActionType = MiscType String deriving Show
+data Action = Action ObjectId ActionType ActionData deriving Show
 
 class TrelloResource a where
   oid :: a -> ObjectId
 instance TrelloResource Member where
-  oid (Member idMember) = idMember
+  oid (Member idMember _) = idMember
 instance TrelloResource Board where
   oid (Board idBoard) = idBoard
 instance TrelloResource Card where
   oid (Card idCard) = idCard
 instance TrelloResource Action where
-  oid (Action idAction _) = idAction
+  oid (Action idAction _ _) = idAction
 
 -- Map of board id -> last action id scanned
 type TailMarker = ObjectId
@@ -39,6 +43,59 @@ type PollState = Map.Map ObjectId TailMarker
 
 -- request stuff
 type Path = String
+
+{- So here's how this works.
+ -
+ - addMemberToCard: Check if data.idMember is me.id. If so, get the card title,
+ -                  add a cover based on the title, and remove self.
+ -
+ - commentCard: If you are at mentioned (@coverbot, maybe use me.username), get
+ -              the rest of the message, and if it is blank, default it to the
+ -              card title. Use the message as the source for the cover image.
+ -}
+
+-- Actions
+
+addMemberToCard :: Auth -> Action -> IO ()
+addMemberToCard auth action = do
+  putStrLn $ "addMemberToCard " ++ show action
+  me <- getMe auth
+  when (isMyId me (getDataIdMember action)) $ do
+    putStrLn $ "Action with id " ++ oid action ++ " added me"
+
+    r <- getCard auth $ getDataCardId action
+    let cardTitle = grabString (r ^. Wreq.responseBody) "name"
+    putStrLn $ "Card title: " ++ cardTitle
+
+    img <- getJpgTo cardTitle
+    putStrLn $ "Using image: " ++ img
+
+commentCard :: Auth -> Action -> IO ()
+commentCard _ _ = putStrLn "commentCard"
+
+-- Helpers
+
+getJpgTo :: String -> IO String
+getJpgTo = undefined
+
+getDataIdMember :: Action -> ObjectId
+getDataIdMember (Action _ _ adata) = grabString adata "idMember"
+
+getDataCardId :: Action -> ObjectId
+getDataCardId (Action _ _ adata) = grabString (fromJust $ adata ^? key "card") "id"
+
+isMyId :: Member -> ObjectId -> Bool
+isMyId (Member me _) other = me == other
+
+{-
+isMyName :: Member -> String -> Bool
+isMyName (Member _ me) other = (me == other)
+
+cardTitle :: Card -> String
+cardTitle = undefined
+-}
+
+-- Trello client
 
 authOptions :: Auth -> Wreq.Options -> Wreq.Options
 authOptions auth = (Wreq.param "key" .~ [authKey auth])
@@ -63,14 +120,23 @@ getTrello auth path query = do
   Wreq.getWith opts (fullPath path)
 
 {-
-postTrello :: Auth -> Path -> IO (Wreq.Response BS.ByteString)
+postTrello :: Auth -> oPath -> IO (Wreq.Response BS.ByteString)
 postTrello auth path = do
   let opts = Wreq.defaults & authOptions auth
   Wreq.postWith opts (fullPath path) BS.empty
 -}
 
-grabValue :: AsValue a => a -> Text -> String
-grabValue obj name = unpack . fromJust $ obj ^? key name . _String
+getMe :: Auth -> IO Member
+getMe auth = do
+  r <- getTrello auth "/1/members/me" emptyQuery
+  let me = r ^. Wreq.responseBody
+  return $ Member (grabString me "id") (grabString me "username")
+
+getCard :: Auth -> ObjectId -> IO (Wreq.Response BS.ByteString)
+getCard auth cid = getTrello auth ("/1/cards/" ++ cid) emptyQuery
+
+grabString :: AsValue a => a -> Text -> String
+grabString obj name = unpack . fromMaybe "undefined" $ obj ^? key name . _String
 
 -- Get new actions on a single board
 getNewActions :: Auth -> Board -> TailMarker -> IO [Action]
@@ -85,8 +151,8 @@ getNewActions auth board tm = do
         query = (Wreq.param "since" .~ [pack tm])
               . (Wreq.param "filter" .~ ["addMemberToCard,commentCard"])
               . (Wreq.param "limit" .~ ["100"])
-        toAction a = (grabValue a "id", grabValue a "type")
-        makeAction (idAction, t) = Action idAction (MiscType t)
+        toAction a = (grabString a "id", grabString a "type", fromJust $ a ^? key "data")
+        makeAction (idAction, t, d) = Action idAction (MiscType t) d
 
 -- Get list of boards you are a member of
 getBoardsList :: Auth -> IO [Board]
@@ -96,31 +162,30 @@ getBoardsList auth = do
   -- debug: only process a single board
   return . {-(:[]) . head . -} map (Board . toBoard) $ boards
   where url = "/1/members/me/boards?fields=id"
-        toBoard b = grabValue b "id"
+        toBoard b = grabString b "id"
 
-{-
-actionTrigger :: Action -> Maybe ()
-actionTrigger (Action idAction actionType) = case actionType of
-  MiscType "commentCard" -> Just ()
-  MiscType "addMemberToCard" -> Just ()
-  _ -> Nothing
-
-processTrigger :: Maybe () -> IO ()
-processTrigger _ = return ()
--}
+actionTrigger :: Auth -> Action -> IO ()
+actionTrigger auth action@(Action _ atype _) = case atype of
+  MiscType "addMemberToCard" -> addMemberToCard auth action
+  MiscType "commentCard" -> commentCard auth action
+  -- Noop
+  _ -> return ()
 
 updateState :: Auth -> (Board, TailMarker) -> IO TailMarker
 updateState auth (board, tm) = do
   putStrLn $ "Updating board " ++ oid board
   actions <- getNewActions auth board tm
   let newActions = filter ((> tm) . oid) actions
+  let actionTriggers = map (actionTrigger auth) newActions
   putStrLn $ "  Found " ++ show (length newActions) ++ " new actions"
   case newActions of
     [] -> return tm
     _ -> do
+      -- do them all
+      sequence_ actionTriggers
       let newTm = maximum . map oid $ newActions
       putStrLn $ "  Processed up to action " ++ newTm
-      return newTm
+      return tm -- newTm
 
 -- Turn a state object and board list into a list of tail markers
 extractStates :: PollState -> [Board] -> [TailMarker]
@@ -165,8 +230,8 @@ pollBoards auth state = do
   let newState = mergeState (Map.fromList updatedPairs) state
   -- Write to disk, wait, and iterate
   commitState newState
-  threadDelay 2000000
-  pollBoards auth newState
+  -- threadDelay 2000000
+  -- pollBoards auth newState
 
 -- Load configuration from disk
 conf :: Configured a => Name -> IO a
