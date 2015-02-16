@@ -14,6 +14,7 @@ import           Data.Time.Clock.POSIX (getPOSIXTime)
 import qualified Network.Wreq as Wreq
 import           Numeric (showHex)
 import           System.Directory (doesFileExist)
+import           System.IO
 
 type Token = Text
 type Key = Text
@@ -311,6 +312,7 @@ conf name = do
 
 main :: IO ()
 main = do
+  hSetBuffering stdout LineBuffering
   auth <- Auth <$> conf "token" <*> conf "key"
 
   pollState <- restoreState
