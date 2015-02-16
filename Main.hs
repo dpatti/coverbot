@@ -301,7 +301,7 @@ pollBoards auth state = do
   let newState = mergeState (Map.fromList updatedPairs) state
   -- Write to disk, wait, and iterate
   commitState newState
-  threadDelay 2000000
+  threadDelay 20000000
   pollBoards auth newState
 
 -- Load configuration from disk
