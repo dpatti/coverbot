@@ -10,7 +10,9 @@ import qualified Data.Configurator as Conf
 import           Data.Configurator.Types (Configured, Name)
 import qualified Data.Map as Map
 import           Data.Text (Text, pack, unpack)
+import           Data.Time.Clock.POSIX (getPOSIXTime)
 import qualified Network.Wreq as Wreq
+import           Numeric (showHex)
 import           System.Directory (doesFileExist)
 
 type Token = Text
@@ -248,9 +250,9 @@ updateState auth (board, tm) = do
       return newTm
 
 -- Turn a state object and board list into a list of tail markers
-extractStates :: PollState -> [Board] -> [TailMarker]
-extractStates ps = map getMarker where
-  getMarker board = fromMaybe (oid board) (Map.lookup (oid board) ps)
+extractStates :: PollState -> ObjectId -> [Board] -> [TailMarker]
+extractStates ps start = map getMarker where
+  getMarker board = fromMaybe start (Map.lookup (oid board) ps)
 
 -- Merge states together. Note: the first argument is given precedence.
 mergeState :: PollState -> PollState -> PollState
@@ -273,6 +275,12 @@ restoreState = do
       return (read contents)
     else return Map.empty
 
+-- Return an ObjectId whose date equivalent is equal to now
+currentObjectId :: IO ObjectId
+currentObjectId = do
+  now <- getPOSIXTime
+  return $ showHex (round now :: Integer) (replicate 16 '0')
+
 -- Main loop
 pollBoards :: Auth -> PollState -> IO ()
 pollBoards auth state = do
@@ -280,8 +288,10 @@ pollBoards auth state = do
   -- Get the boards we are on
   boards <- getBoardsList auth
   putStrLn . ("Found boards: " ++) . show . map oid $ boards
+  -- Set a default tailmarker based on the current timestamp
+  now <- currentObjectId
   -- Pull out the states for those boards
-  let states = extractStates state boards
+  let states = extractStates state now boards
   -- Using the existing state, perform the query on each board that returns new
   -- pairs
   newTails <- mapM (updateState auth) (zip boards states)
